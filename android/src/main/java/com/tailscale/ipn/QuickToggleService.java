@@ -25,14 +25,14 @@ public class QuickToggleService extends TileService {
         boolean act;
         synchronized (lock) {
             t = currentTile;
-            act = isRunning && app.isAbleToStartVPN();
+            act = (isRunning || ScreenPowerSettings.INSTANCE.connectionRequested(app)) && app.isAbleToStartVPN();
         }
         if (t == null) {
             return;
         }
-        t.setLabel("Tailscale");
+        t.setLabel("Tailscale Screen");
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            t.setSubtitle(act ? app.getString(R.string.connected) : app.getString(R.string.not_connected));
+            t.setSubtitle(app.getString(act ? (isRunning ? R.string.connected : R.string.screen_power_waiting) : R.string.not_connected));
         }
         t.setState(act ? Tile.STATE_ACTIVE : Tile.STATE_INACTIVE);
         t.updateTile();
@@ -83,7 +83,7 @@ public class QuickToggleService extends TileService {
       UninitializedApp app = UninitializedApp.get();                                                                                                    
       boolean needsToStop;                                                                                                                            
       synchronized (lock) {
-          needsToStop = isRunning;
+          needsToStop = isRunning || ScreenPowerSettings.INSTANCE.connectionRequested(app);
       }
       if (needsToStop) {
           app.stopVPN();

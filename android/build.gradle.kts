@@ -22,11 +22,12 @@ android {
   compileSdk = androidApiLevel
 
   defaultConfig {
+    applicationId = "com.tailscale.ipn.screenpower"
     minSdk = 26
     targetSdk = androidApiLevel
 
     versionCode = computeVersionCode()
-    versionName = getVersionProperty("VERSION_LONG")
+    versionName = getVersionProperty("VERSION_LONG") + "-screenpower.1"
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
     buildConfigField(
@@ -55,6 +56,7 @@ android {
     debug { manifestPlaceholders["leanbackRequired"] = isTV() }
 
     release {
+      signingConfig = signingConfigs.getByName("debug")
       manifestPlaceholders["leanbackRequired"] = isTV()
       isMinifyEnabled = true
       isShrinkResources = true

@@ -3,29 +3,71 @@
 package com.tailscale.ipn
 
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.net.Network
 import android.net.VpnService
 import android.os.Build
+import android.os.PowerManager
 import android.system.OsConstants
+import androidx.core.content.ContextCompat
 import com.tailscale.ipn.mdm.MDMSettings
+import com.tailscale.ipn.ui.localapi.Client
 import com.tailscale.ipn.ui.model.Ipn
 import com.tailscale.ipn.ui.notifier.Notifier
 import com.tailscale.ipn.util.TSLog
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.coroutines.resume
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import libtailscale.Libtailscale
 
 open class IPNService : VpnService(), libtailscale.IPNService {
   private val TAG = "IPNService"
   private val randomID: String = UUID.randomUUID().toString()
   private lateinit var app: App
-  val scope = CoroutineScope(Dispatchers.IO)
+  val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
   private var closed = false
+  private val restartRequested = AtomicBoolean(false)
+  private lateinit var powerController: ScreenPowerController
+  private lateinit var powerPrefs: SharedPreferences
+  private val screenReceiver =
+      object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+          if (ScreenPowerSettings.connectionRequested(this@IPNService)) powerController.update()
+        }
+      }
+  private val powerPrefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+    if (key == ScreenPowerSettings.ENABLED && ScreenPowerSettings.connectionRequested(this)) {
+      powerController.update()
+    }
+  }
+
+  private fun requestConnection(wanted: Boolean) {
+    // Persist intent separately from WantRunning, which is false while screen-paused.
+    ScreenPowerSettings.setConnectionRequested(this, wanted)
+    powerController.update()
+  }
+
+  private fun shouldRun(): Boolean =
+      ScreenPowerSettings.shouldRun(
+          requested = ScreenPowerSettings.connectionRequested(this),
+          interactive = getSystemService(PowerManager::class.java).isInteractive,
+          enabled = ScreenPowerSettings.enabled(this),
+          forceEnabled = MDMSettings.forceEnabled.flow.value.value,
+          lockdown = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && isLockdownEnabled,
+      )
 
   override fun id(): String {
     return randomID
@@ -40,6 +82,39 @@ open class IPNService : VpnService(), libtailscale.IPNService {
     // grab app to make sure it initializes
     app = App.get()
 
+    powerController =
+        ScreenPowerController(
+            scope = scope,
+            shouldRun = { shouldRun() },
+            connectionRequested = { ScreenPowerSettings.connectionRequested(this) },
+            applyRunning = { running -> applyPowerState(running) },
+            stopIfDisconnected = {
+              withContext(Dispatchers.Main) {
+                // Recheck on the main thread, where start/stop intents are delivered.
+                if (!ScreenPowerSettings.connectionRequested(this@IPNService)) {
+                  close()
+                  true
+                } else false
+              }
+            },
+        )
+    powerPrefs = ScreenPowerSettings.prefs(this)
+    powerPrefs.registerOnSharedPreferenceChangeListener(powerPrefsListener)
+    ContextCompat.registerReceiver(
+        this,
+        screenReceiver,
+        IntentFilter().apply {
+          addAction(Intent.ACTION_SCREEN_ON)
+          addAction(Intent.ACTION_SCREEN_OFF)
+        },
+        ContextCompat.RECEIVER_NOT_EXPORTED,
+    )
+    scope.launch {
+      MDMSettings.forceEnabled.flow.collect {
+        if (ScreenPowerSettings.connectionRequested(this@IPNService)) powerController.update()
+      }
+    }
+
     NetworkChangeCallback.setUnderlyingNetworkListener { network ->
       updateUnderlyingNetwork(network)
     }
@@ -48,16 +123,15 @@ open class IPNService : VpnService(), libtailscale.IPNService {
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int =
       when (intent?.action) {
         ACTION_STOP_VPN -> {
-          app.setWantRunning(false)
-          close()
+          requestConnection(false)
           START_NOT_STICKY
         }
         ACTION_RESTART_VPN -> {
-          app.setWantRunning(false) {
-            close()
-            app.startVPN()
-          }
-          START_NOT_STICKY
+          // Rebuild the tunnel in this service instance. Destroying and immediately
+          // restarting it could race Android's lifecycle and discard screen events.
+          restartRequested.set(true)
+          powerController.update()
+          START_STICKY
         }
         ACTION_START_FOREGROUND_ONLY -> {
           // Start the foreground service notification without creating a VPN tunnel.
@@ -68,32 +142,24 @@ open class IPNService : VpnService(), libtailscale.IPNService {
         }
         ACTION_START_VPN -> {
           showForegroundNotification()
-          app.setWantRunning(true)
-          Libtailscale.requestVPN(this)
+          requestConnection(true)
           START_STICKY
         }
         "android.net.VpnService" -> {
-          // This means we were started by Android due to Always On VPN.
-          // We show a non-foreground notification because we weren't
-          // started as a foreground service.
-          scope.launch {
-            // Collect the first value of hideDisconnectAction asynchronously.
-            val hideDisconnectAction = MDMSettings.forceEnabled.flow.first()
-            val exitNodeName =
-                UninitializedApp.getExitNodeName(Notifier.prefs.value, Notifier.netmap.value)
-            app.notifyStatus(true, hideDisconnectAction.value, exitNodeName)
-          }
-          app.setWantRunning(true)
-          Libtailscale.requestVPN(this)
+          // Keep screen broadcasts deliverable even while the VPN tunnel is paused.
+          showForegroundNotification()
+          requestConnection(true)
           START_STICKY
         }
         else -> {
           // This means that we were restarted after the service was killed
           // (potentially due to OOM).
-          if (UninitializedApp.get().isAbleToStartVPN()) {
+          if (
+              UninitializedApp.get().isAbleToStartVPN() &&
+                  ScreenPowerSettings.connectionRequested(this)
+          ) {
             showForegroundNotification()
-            App.get()
-            Libtailscale.requestVPN(this)
+            powerController.update()
             START_STICKY
           } else {
             START_NOT_STICKY
@@ -114,6 +180,10 @@ open class IPNService : VpnService(), libtailscale.IPNService {
   }
 
   override fun onDestroy() {
+    unregisterReceiver(screenReceiver)
+    powerPrefs.unregisterOnSharedPreferenceChangeListener(powerPrefsListener)
+    powerController.close()
+    scope.cancel()
     NetworkChangeCallback.setUnderlyingNetworkListener(null)
     close()
     updateVpnStatus(false)
@@ -123,11 +193,47 @@ open class IPNService : VpnService(), libtailscale.IPNService {
   override fun onRevoke() {
     // VPN permission was granted to another app, so tell the Go backend and then set prepared to be
     // false so that when user attempts to connect again, VpnService.prepare() is called
-    app.setWantRunning(false)
+    ScreenPowerSettings.setConnectionRequested(this, false)
+    stopAfterPendingEdits()
     setVpnPrepared(false)
     close()
     updateVpnStatus(false)
     super.onRevoke()
+  }
+
+  private suspend fun editRunning(running: Boolean): Boolean {
+    val result =
+        suspendCancellableCoroutine<Result<Ipn.Prefs>> { continuation ->
+          Client(scope).editPrefs(Ipn.MaskedPrefs().apply { WantRunning = running }) {
+            if (continuation.isActive) continuation.resume(it)
+          }
+        }
+    result.onFailure { TSLog.e(TAG, "Screen power update failed: $it") }
+    return result.isSuccess
+  }
+
+  private suspend fun applyPowerState(running: Boolean): Boolean {
+    if (restartRequested.getAndSet(false)) {
+      if (!editRunning(false)) {
+        restartRequested.set(true)
+        return false
+      }
+      Libtailscale.serviceDisconnect(this)
+    }
+    // Keep the foreground service and receiver during screen-off. Restoring the
+    // same service after a pause avoids Android background-start restrictions.
+    if (running) Libtailscale.requestVPN(this)
+    return editRunning(running)
+  }
+
+  private fun stopAfterPendingEdits(onSuccess: (() -> Unit)? = null) {
+    scope.cancel()
+    app.applicationScope.launch {
+      // Go LocalAPI calls can finish after coroutine cancellation. Wait for the
+      // service's children before the final stop edit so that it cannot be undone.
+      scope.coroutineContext[Job]?.join()
+      app.setWantRunning(false, onSuccess)
+    }
   }
 
   private fun setVpnPrepared(isPrepared: Boolean) {

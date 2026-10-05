@@ -16,6 +16,7 @@ import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
@@ -720,15 +721,26 @@ open class UninitializedApp : Application() {
       hideDisconnectAction: Boolean,
       exitNodeName: String? = null,
   ): Notification {
-    val title = getString(if (vpnRunning) R.string.connected else R.string.not_connected)
+    val screenPaused =
+        !vpnRunning &&
+            ScreenPowerSettings.connectionRequested(this) &&
+            ScreenPowerSettings.enabled(this) &&
+            !getSystemService(PowerManager::class.java).isInteractive
+    val title =
+        getString(
+            if (screenPaused) R.string.screen_power_paused
+            else if (vpnRunning) R.string.connected else R.string.not_connected
+        )
     val message =
         if (vpnRunning && exitNodeName != null) {
           getString(R.string.using_exit_node, exitNodeName)
         } else null
     val icon = if (vpnRunning) R.drawable.ic_notification else R.drawable.ic_notification_disabled
     val action =
-        if (vpnRunning) IPNReceiver.INTENT_DISCONNECT_VPN else IPNReceiver.INTENT_CONNECT_VPN
-    val actionLabel = getString(if (vpnRunning) R.string.disconnect else R.string.connect)
+        if (vpnRunning || screenPaused) IPNReceiver.INTENT_DISCONNECT_VPN
+        else IPNReceiver.INTENT_CONNECT_VPN
+    val actionLabel =
+        getString(if (vpnRunning || screenPaused) R.string.disconnect else R.string.connect)
     val buttonIntent = Intent(this, IPNReceiver::class.java).apply { this.action = action }
     val pendingButtonIntent: PendingIntent =
         PendingIntent.getBroadcast(

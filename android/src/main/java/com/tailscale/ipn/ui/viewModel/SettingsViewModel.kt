@@ -5,6 +5,7 @@ package com.tailscale.ipn.ui.viewModel
 
 import androidx.lifecycle.viewModelScope
 import com.tailscale.ipn.App
+import com.tailscale.ipn.ScreenPowerSettings
 import com.tailscale.ipn.ui.localapi.Client
 import com.tailscale.ipn.ui.notifier.Notifier
 import com.tailscale.ipn.ui.util.LoadingIndicator
@@ -36,6 +37,14 @@ class SettingsViewModel : IpnViewModel() {
   // True if tailscaleDNS is enabled. nil if not yet known.
   val corpDNSEnabled: StateFlow<Boolean?> = MutableStateFlow(null)
   val isClientRemoteLoggingEnabled: StateFlow<Boolean> = MutableStateFlow(true)
+
+  val screenPowerEnabled: StateFlow<Boolean> =
+      MutableStateFlow(ScreenPowerSettings.enabled(App.get()))
+
+  fun toggleScreenPowerEnabled() {
+    screenPowerEnabled.set(!screenPowerEnabled.value)
+    ScreenPowerSettings.setEnabled(App.get(), screenPowerEnabled.value)
+  }
 
   init {
     isClientRemoteLoggingEnabled.set(App.get().isClientLoggingEnabled())

@@ -16,6 +16,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.tailscale.ipn.App
 import com.tailscale.ipn.R
+import com.tailscale.ipn.ScreenPowerSettings
 import com.tailscale.ipn.mdm.MDMSettings
 import com.tailscale.ipn.ui.model.Favorites
 import com.tailscale.ipn.ui.model.Ipn.State
@@ -274,7 +275,7 @@ class MainViewModel(private val appViewModel: AppViewModel) : IpnViewModel() {
           }
         } else {
           // User wants to turn OFF the VPN
-          if (currentState == State.Running) {
+          if (currentState == State.Running || ScreenPowerSettings.connectionRequested(App.get())) {
             stopVPN()
           }
         }

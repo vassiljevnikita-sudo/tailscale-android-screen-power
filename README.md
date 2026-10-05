@@ -1,3 +1,5 @@
+> **Experimental screen-power fork:** [Behavior, installation, audit and measurement limits](SCREEN_POWER.md). This is independently built and signed, not an official Tailscale release.
+
 # Tailscale Android Client
 
 https://tailscale.com

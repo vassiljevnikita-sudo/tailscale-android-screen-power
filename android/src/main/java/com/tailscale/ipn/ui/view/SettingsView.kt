@@ -64,6 +64,7 @@ fun SettingsView(
   val showTailnetLock by MDMSettings.manageTailnetLock.flow.collectAsState()
   val useTailscaleSubnets by MDMSettings.useTailscaleSubnets.flow.collectAsState()
   val isClientRemoteLoggingEnabled by viewModel.isClientRemoteLoggingEnabled.collectAsState()
+  val screenPowerEnabled by viewModel.screenPowerEnabled.collectAsState()
   var showDisableLoggingDialog by remember { mutableStateOf(false) }
 
   Scaffold(
@@ -119,6 +120,15 @@ fun SettingsView(
         Lists.ItemDivider()
         Setting.Text(R.string.subnet_routing, onClick = settingsNav.onNavigateToSubnetRouting)
       }
+
+      Lists.ItemDivider()
+      Setting.Switch(
+          R.string.screen_power_enabled,
+          subtitle = stringResource(R.string.screen_power_subtitle),
+          isOn = screenPowerEnabled,
+          enabled = !MDMSettings.forceEnabled.flow.value.value,
+          onToggle = { viewModel.toggleScreenPowerEnabled() },
+      )
 
       Lists.ItemDivider()
       Setting.Switch(
